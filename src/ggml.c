@@ -2884,6 +2884,36 @@ struct ggml_tensor * ggml_view_2d(
     return result;
 }
 
+// ggml_view_3d
+
+struct ggml_tensor * ggml_view_3d(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   ne0,
+        int                   ne1,
+        int                   ne2,
+        size_t                nb1,
+        size_t                offset) {
+    if (a->grad) {
+        assert(false); // gradient propagation is not supported
+    }
+
+    const int ne[GGML_MAX_DIMS] = { ne0, ne1, ne2, 1 };
+
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, a->type, 3, ne, (char *) a->data + offset);
+
+    result->nb[1] = nb1;
+    result->nb[2] = result->nb[1]*ne1;
+    result->nb[3] = result->nb[2]*ne2;
+
+    result->op   = GGML_OP_VIEW;
+    result->grad = NULL;
+    result->src0 = a;
+    result->src1 = NULL; // TODO: maybe store the offset here?
+
+    return result;
+}
+
 // ggml_permute
 
 struct ggml_tensor * ggml_permute(
