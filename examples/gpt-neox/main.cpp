@@ -424,16 +424,11 @@ bool gptneox_eval(
     // [n_embd, N]
     struct ggml_tensor * inpL = ggml_get_rows(ctx0, model.embed_in, embd);
 
-    // fprintf(stderr, "(inpL:%f)", ggml_get_f32_1d(ggml_sum(ctx0, inpL), 0));
-
     for (int il = 0; il < n_layer; ++il) {
         struct ggml_tensor * cur;
 
-        // []
-        // fprintf(stderr, "(hs:%f)", ggml_get_f32_1d(ggml_sum(ctx0, inpL), 0));
-
         // input norm
-        // [n_embd, N] --> [n_embd, N] TODO: verify
+        // [n_embd, N] --> [n_embd, N]
         {
             cur = ggml_norm(ctx0, inpL);
 
@@ -444,7 +439,6 @@ bool gptneox_eval(
                         cur),
                     ggml_repeat(ctx0, model.layers[il].ln_in_b, cur));
         }
-        // fprintf(stderr, "(ln_in:%f)", ggml_get_f32_1d(ggml_sum(ctx0, cur), 0));
 
         // attn
         // [n_embd, N] --> [3*n_embd, N]
@@ -458,7 +452,6 @@ bool gptneox_eval(
                     cur);
         }
 
-        // fprintf(stderr, "(pattn(%d):%dx%dx%dx%d;%f)", cur->n_dims, cur->ne[0], cur->ne[1], cur->ne[2], cur->ne[3], ggml_get_f32_1d(ggml_sum(ctx0, cur), 0));
         // reshape attn
         {
             // [3*n_embd, N] --> [3*n_embd/n_head, n_head, N]
@@ -466,14 +459,15 @@ bool gptneox_eval(
         }
         // self-attention
         {
-            // fprintf(stderr, "[qkv:(%zu)]", ggml_element_size(cur));
             // [3*d_key, n_head, N] --> [d_key, n_head, N]
-            // TODO: check if ggml_view_3d is correct
+            // TODO: check if ggml_view_3d is correctly implemented
+            // And for the curious, no, reshape then split is not equivalent to split then reshape.
             struct ggml_tensor * Qcur = ggml_view_3d(ctx0, cur, d_key, n_head, N, cur->nb[1], 0*ggml_element_size(cur)*d_key);
             struct ggml_tensor * Kcur = ggml_view_3d(ctx0, cur, d_key, n_head, N, cur->nb[1], 1*ggml_element_size(cur)*d_key);
             struct ggml_tensor * Vcur = ggml_view_3d(ctx0, cur, d_key, n_head, N, cur->nb[1], 2*ggml_element_size(cur)*d_key);
 
             // rotary embeddings
+            // `cpy` is used to make Qcur and Kcur contiguous
             Qcur = ggml_rope(ctx0, ggml_cpy(ctx0, Qcur, ggml_new_tensor(ctx0, Qcur->type, Qcur->n_dims, Qcur->ne)), n_past, n_rot, 0);
             Kcur = ggml_rope(ctx0, ggml_cpy(ctx0, Kcur, ggml_new_tensor(ctx0, Kcur->type, Kcur->n_dims, Kcur->ne)), n_past, n_rot, 0);
 
@@ -501,9 +495,6 @@ bool gptneox_eval(
                             // n_past, n_rot, 0),
                         0, 2, 1, 3);
 
-            // fprintf(stderr, "{%dx%dx%dx%d}", Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3]);
-            // fprintf(stderr, "(Q:%f)", ggml_get_f32_1d(ggml_sum(ctx0, ggml_abs(ctx0, Q)), 0));
-
             // K = Kmem.view(n_embd/n_head, n_head, n_past + N).permute(0, 2, 1, 3)
             // FIXME: rope or permute before or after?
             // [n_embd, n_past+N] --> [n_embd/n_head, n_head, n_past+N] --> [n_embd/n_head, n_past+N, n_head]
@@ -515,8 +506,6 @@ bool gptneox_eval(
                                 n_embd/n_head, n_head, n_past + N),
                             // n_past, n_rot, 1),
                         0, 2, 1, 3);
-            // fprintf(stderr, "<%dx%dx%dx%d>", K->ne[0], K->ne[1], K->ne[2], K->ne[3]);
-            // fprintf(stderr, "(K:%f)", ggml_get_f32_1d(ggml_sum(ctx0, ggml_abs(ctx0, K)), 0));
 
             // K * Q
             // --> [n_past+N, N, n_head]
@@ -536,8 +525,6 @@ bool gptneox_eval(
             // KQ = soft_max(KQ_masked)
             struct ggml_tensor * KQ_soft_max = ggml_soft_max(ctx0, KQ_masked);
 
-            // fprintf(stderr, "(at(%d):%dx%dx%d;%f)", KQ_soft_max->n_dims, KQ_soft_max->ne[0], KQ_soft_max->ne[1], KQ_soft_max->ne[2], ggml_get_f32_1d(ggml_sum(ctx0, KQ_soft_max), 0));
-
             // V_trans = Vmem.view(n_embd/n_head, n_head, n_past + N).permute(1, 2, 0, 3).contiguous()
             // [n_embd, n_past+N] --> [n_embd/n_head, n_head, n_past+N] --> [n_past+N, n_embd/n_head, n_head]
             struct ggml_tensor * V_trans =
@@ -547,13 +534,9 @@ bool gptneox_eval(
                             n_embd/n_head, n_head, n_past + N),
                         1, 2, 0, 3);
 
-            // fprintf(stderr, "(V_trans(%d):%dx%dx%d;%f)", V_trans->n_dims, V_trans->ne[0], V_trans->ne[1], V_trans->ne[2], ggml_get_f32_1d(ggml_sum(ctx0, V_trans), 0));
-
             // KQV = transpose(V) * KQ_soft_max
             // [n_past+N, n_embd/n_head , n_head] * [n_past+N, N, n_head] --> [n_embd/n_head, N, n_head]
             struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V_trans, KQ_soft_max);
-
-            // fprintf(stderr, "(KQV(%d):%dx%dx%d;%f)", KQV->n_dims, KQV->ne[0], KQV->ne[1], KQV->ne[2], ggml_get_f32_1d(ggml_sum(ctx0, KQV), 0));
 
             // KQV_merged = KQV.permute(0, 2, 1, 3)
             // [n_embd/n_head, N, n_head] --> [n_embd/n_head, n_head, N]
@@ -566,6 +549,7 @@ bool gptneox_eval(
                     ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, N));
 
             // projection (with bias)
+            // [n_embd, n_embd] * [n_embd, N] --> [n_embd, N]
             cur = ggml_mul_mat(ctx0,
                     model.layers[il].c_attn_proj_w,
                     cur);
@@ -579,6 +563,7 @@ bool gptneox_eval(
         // post-attention layer norm
         {
             // note here we pass inpL instead of cur
+            // [n_embd, N]
             cur = ggml_norm(ctx0, inpL);
 
             // cur = ln_attn_w*cur + ln_attn_b
@@ -591,6 +576,7 @@ bool gptneox_eval(
         // feed-forward network
         // this is independent of the self-attention result, so it could be done in parallel to the self-attention
         {
+            // [n_embd, 4*n_embd] * [n_embd, N] --> [4*n_embd, N]
             cur = ggml_mul_mat(ctx0,
                     model.layers[il].c_mlp_h_to_4h_w,
                     cur);
@@ -604,6 +590,7 @@ bool gptneox_eval(
 
             // projection
             // cur = proj_w*cur + proj_b
+            // [4*n_embd, n_embd] * [4*n_embd, N] --> [n_embd, N]
             cur = ggml_mul_mat(ctx0,
                     model.layers[il].c_mlp_4h_to_h_w,
                     cur);
@@ -612,18 +599,19 @@ bool gptneox_eval(
                     ggml_repeat(ctx0, model.layers[il].c_mlp_4h_to_h_b, cur),
                     cur);
         }
-        // fprintf(stderr, "(ff:%f)", ggml_get_f32_1d(ggml_sum(ctx0, ggml_abs(ctx0, cur)), 0));
 
         // self-attention + FF
         cur  = ggml_add(ctx0, outAttn, cur);
 
         // input for next layer
+        // add residual
+        // [n_embd, N]
         inpL = ggml_add(ctx0, cur, inpL);
     }
-    // fprintf(stderr, "\n[%f]\n", ggml_get_f32_1d(ggml_sum(ctx0, ggml_abs(ctx0, inpL)), 0));
 
     // final layer norm
     {
+        // [n_embd, N]
         inpL = ggml_norm(ctx0, inpL);
 
         // inpL = ln_f_g*inpL + ln_f_b
@@ -635,10 +623,8 @@ bool gptneox_eval(
     }
 
     // lm_head
+    // [n_embd, n_vocab] * [n_embd, N] --> [n_vocab, N]
     inpL = ggml_mul_mat(ctx0, model.embed_out, inpL);
-
-    // fprintf(stderr, "(lm_head(%d):%dx%dx%dx%d)", inpL->n_dims, inpL->ne[0], inpL->ne[1], inpL->ne[2], inpL->ne[3]);
-    // fprintf(stderr, "\n[logits:%f]\n", ggml_get_f32_1d(ggml_sum(ctx0, inpL), 0));
 
     // logits -> probs
     //inpL = ggml_soft_max(ctx0, inpL);
@@ -656,6 +642,7 @@ bool gptneox_eval(
     //memcpy(embd_w.data(), ggml_get_data(inpL), sizeof(float)*n_vocab*N);
 
     // return result for just the last token
+    // [n_vocab]
     embd_w.resize(n_vocab);
     memcpy(embd_w.data(), (float *) ggml_get_data(inpL) + (n_vocab*(N-1)), sizeof(float)*n_vocab);
 
@@ -673,7 +660,7 @@ int main(int argc, char ** argv) {
     const int64_t t_main_start_us = ggml_time_us();
 
     gpt_params params;
-    params.model = "models/gpt-j-6B/ggml-model.bin";
+    params.model = "models/gpt-neox/ggml-model.bin";
 
     if (gpt_params_parse(argc, argv, params) == false) {
         return 1;
